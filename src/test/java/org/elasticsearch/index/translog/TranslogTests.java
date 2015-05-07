@@ -19,6 +19,7 @@
 
 package org.elasticsearch.index.translog;
 
+import com.carrotsearch.randomizedtesting.annotations.Seed;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.store.ByteArrayDataOutput;
 import org.apache.lucene.util.IOUtils;
@@ -909,7 +910,8 @@ public class TranslogTests extends ElasticsearchTestCase {
         } else {
             // live reader!
             ByteBuffer buffer = ByteBuffer.allocate(4);
-            reader.readBytes(buffer, reader.firstPosition() + 4*numOps);
+            final long pos = reader.firstPosition() + 4 * numOps;
+            reader.readBytes(buffer, pos);
             buffer.flip();
             final int value = buffer.getInt();
             assertEquals(2048, value);

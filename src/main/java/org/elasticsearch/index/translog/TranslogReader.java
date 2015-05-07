@@ -47,6 +47,7 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
 
     private static final byte LUCENE_CODEC_HEADER_BYTE = 0x3f;
     private static final byte UNVERSIONED_TRANSLOG_HEADER_BYTE = 0x00;
+    private static final long HEADER_LENGTH = CodecUtil.headerLength(TranslogWriter.TRANSLOG_CODEC);
 
     protected final long id;
     protected final ChannelReference channelReference;
@@ -67,7 +68,7 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
 
     /** the position the first operation is written at */
     public long firstPosition() {
-        return CodecUtil.headerLength(TranslogWriter.TRANSLOG_CODEC);
+        return HEADER_LENGTH;
     }
 
     abstract public int totalOperations();

@@ -36,10 +36,7 @@ import org.elasticsearch.index.shard.ShardId;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
+import java.nio.file.*;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -75,7 +72,11 @@ public class TranslogWriter extends TranslogReader {
     public static TranslogWriter create(Type type, ShardId shardId, long id, Path file, Callback<ChannelReference> onClose, int bufferSize) throws IOException {
         Path pendingFile = file.resolveSibling("pending_" + file.getFileName());
         final int headerLength = CodecUtil.headerLength(TRANSLOG_CODEC);
-        try (FileChannel channel = FileChannel.open(pendingFile, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW)) {
+        /**
+         * We first create pending_translog, write the header, fsync it and write a checkpoint. Then we rename the pending file into
+         * the actual file such that there is never a file without valid header. If the header is missing it's corrupted
+         */
+        try (FileChannel channel = FileChannel.open(pendingFile, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW)) {
             // This OutputStreamDataOutput is intentionally not closed because
             // closing it will close the FileChannel
             OutputStreamDataOutput out = new OutputStreamDataOutput(java.nio.channels.Channels.newOutputStream(channel));
@@ -296,22 +297,13 @@ public class TranslogWriter extends TranslogReader {
         writeCheckpoint(lastSyncPosition, operationCounter, channelReference.getPath());
     }
 
-    //    @SuppressForbidden(reason = "We need control over if the channel write succeeded")
+
+
     private static void writeCheckpoint(long syncPosition, int numOperations, Path translogFile) throws IOException {
         final Path checkpointFile = checkpointFile(translogFile);
         try (FileChannel channel = FileChannel.open(checkpointFile, StandardOpenOption.WRITE, StandardOpenOption.CREATE)) {
             Checkpoint checkpoint = new Checkpoint(syncPosition, numOperations);
-            byte[] buffer = new byte[RamUsageEstimator.NUM_BYTES_INT + RamUsageEstimator.NUM_BYTES_LONG];
-
-            checkpoint.write(new ByteArrayDataOutput(buffer));
-            Channels.writeToChannel(buffer, channel);
-            /* //nocommit should we rather do our own writing here?
-            ByteBuffer bb = ByteBuffer.wrap(buffer, 0, buffer.length);
-            final int write = channel.write(bb);
-            if (write != buffer.length) { // hmm should we retry here?
-                throw new IllegalStateException("write checkpoint failed only wrote: " + write + " bytes");
-            }
-            */
+            checkpoint.write(channel);
             channel.force(false);
         }
     }

@@ -82,8 +82,11 @@ public final class BufferingTranslogWriter extends TranslogWriter {
     protected void readBytes(ByteBuffer targetBuffer, long position) throws IOException {
         try (ReleasableLock lock = readLock.acquire()) {
             if (position >= writtenOffset) {
-                System.arraycopy(buffer, (int) (position - writtenOffset),
+                assert targetBuffer.hasArray() : "buffer must have array";
+                final int sourcePosition = (int) (position - writtenOffset);
+                System.arraycopy(buffer, sourcePosition,
                         targetBuffer.array(), targetBuffer.position(), targetBuffer.limit());
+                targetBuffer.position(targetBuffer.limit());
                 return;
             }
         }

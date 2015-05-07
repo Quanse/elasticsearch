@@ -18,8 +18,11 @@
  */
 package org.elasticsearch.index.translog;
 
+import org.apache.lucene.store.ByteArrayDataOutput;
 import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.DataOutput;
+import org.apache.lucene.util.RamUsageEstimator;
+import org.elasticsearch.common.io.Channels;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -46,9 +49,12 @@ class Checkpoint implements Comparable<Checkpoint> {
         return Long.compare(syncedPosition, o.syncedPosition);
     }
 
-    void write(DataOutput out) throws IOException {
+    void write(FileChannel channel) throws IOException {
+        byte[] buffer = new byte[RamUsageEstimator.NUM_BYTES_INT + RamUsageEstimator.NUM_BYTES_LONG];
+        final ByteArrayDataOutput out = new ByteArrayDataOutput(buffer);
         out.writeLong(syncedPosition);
         out.writeInt(numWrittenOperations);
+        Channels.writeToChannel(buffer, channel);
     }
 
     @Override
