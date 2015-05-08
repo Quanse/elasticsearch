@@ -845,8 +845,8 @@ public class IndexShard extends AbstractIndexShardComponent {
         assert recoveredTypes.isEmpty();
         assert recoveryState.getTranslog().recoveredOperations() == 0;
         if (wipeTranslogs) {
-            final Translog translog = engine().getTranslog();
-            translog.markCommitted(translog.currentId());
+            engine().flush(true, true);
+          // nocommit - what do we need to do here?
         }
     }
 

@@ -79,6 +79,7 @@ import org.elasticsearch.index.store.DirectoryService;
 import org.elasticsearch.index.store.DirectoryUtils;
 import org.elasticsearch.index.store.Store;
 import org.elasticsearch.index.translog.Translog;
+import org.elasticsearch.index.translog.TranslogWriter;
 import org.elasticsearch.test.DummyShardLock;
 import org.elasticsearch.test.ElasticsearchTestCase;
 import org.elasticsearch.test.junit.annotations.TestLogging;
@@ -89,6 +90,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
@@ -1546,7 +1548,10 @@ public class InternalEngineTests extends ElasticsearchTestCase {
         engine.close();
         // fake a new translog, causing the engine to point to a missing one.
         Translog translog = createTranslog();
-        translog.markCommitted(translog.currentId());
+        long id = translog.currentId();
+        Path path = translog.location();
+        IOUtils.rm(path);
+        Files.createDirectories(path);
         // we have to re-open the translog because o.w. it will complain about commit information going backwards, which is OK as we did a fake markComitted
         translog.close();
         try {

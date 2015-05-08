@@ -30,38 +30,56 @@ import java.nio.channels.FileChannel;
 
 /**
  */
-class Checkpoint implements Comparable<Checkpoint> {
-    final long syncedPosition;
-    final int numWrittenOperations;
+class Checkpoint {
 
-    Checkpoint(long syncedPosition, int numWrittenOperations) {
-        this.syncedPosition = syncedPosition;
-        this.numWrittenOperations = numWrittenOperations;
+   static final int BUFFER_SIZE = RamUsageEstimator.NUM_BYTES_INT  // ops
+            + RamUsageEstimator.NUM_BYTES_LONG // offset
+            + RamUsageEstimator.NUM_BYTES_LONG;// id
+    final long offset;
+    final int numOps;
+    final long translogId;
+
+    Checkpoint(long offset, int numOps, long translogId) {
+        this.offset = offset;
+        this.numOps = numOps;
+        this.translogId = translogId;
+    }
+
+    Checkpoint(FileChannel in, long position) throws IOException {
+        ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
+        in.read(buffer, position);
+        buffer.flip();
+        offset = buffer.getLong();
+        numOps = buffer.getInt();
+        translogId = buffer.getLong();
     }
 
     Checkpoint(DataInput in) throws IOException {
-        syncedPosition = in.readLong();
-        numWrittenOperations = in.readInt();
-    }
-
-    @Override
-    public int compareTo(Checkpoint o) {
-        return Long.compare(syncedPosition, o.syncedPosition);
+        offset = in.readLong();
+        numOps = in.readInt();
+        translogId = in.readLong();
     }
 
     void write(FileChannel channel) throws IOException {
-        byte[] buffer = new byte[RamUsageEstimator.NUM_BYTES_INT + RamUsageEstimator.NUM_BYTES_LONG];
+        byte[] buffer = new byte[BUFFER_SIZE];
         final ByteArrayDataOutput out = new ByteArrayDataOutput(buffer);
-        out.writeLong(syncedPosition);
-        out.writeInt(numWrittenOperations);
+        write(out);
         Channels.writeToChannel(buffer, channel);
+    }
+
+    public void write(DataOutput out) throws IOException {
+        out.writeLong(offset);
+        out.writeInt(numOps);
+        out.writeLong(translogId);
     }
 
     @Override
     public String toString() {
-        return "Checkpoint{" +
-                "syncedPosition=" + syncedPosition +
-                ", numWrittenOperations=" + numWrittenOperations +
+        return "TranslogInfo{" +
+                "offset=" + offset +
+                ", numOps=" + numOps +
+                ", translogId= " + translogId +
                 '}';
     }
+
 }

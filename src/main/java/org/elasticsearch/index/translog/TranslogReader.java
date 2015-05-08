@@ -19,10 +19,12 @@
 
 package org.elasticsearch.index.translog;
 
+import com.sun.tools.javac.comp.Check;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.index.IndexFormatTooNewException;
 import org.apache.lucene.index.IndexFormatTooOldException;
+import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.InputStreamDataInput;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.common.bytes.BytesArray;
@@ -115,6 +117,7 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
         buffer.clear();
         buffer.limit(opSize);
         readBytes(buffer, position);
+        buffer.flip();
         BytesArray bytesArray = new BytesArray(buffer.array(), 0, buffer.limit());
         return read(bytesArray.streamInput());
     }
@@ -144,6 +147,12 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
         channelReference.decRef();
     }
 
+    protected void ensureOpen() {
+        if (closed.get()) {
+            throw new AlreadyClosedException("translog [" + translogId() + "] is already closed");
+        }
+    }
+
     @Override
     public String toString() {
         return "translog [" + id + "][" + channelReference.getPath() + "]";
@@ -164,7 +173,7 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
      *
      * @throws IOException
      */
-    public static ImmutableTranslogReader open(ChannelReference channelReference) throws IOException {
+    public static ImmutableTranslogReader open(ChannelReference channelReference, boolean committed) throws IOException {
         final FileChannel channel = channelReference.getChannel();
         final Path path = channelReference.getPath();
         try {
@@ -209,17 +218,21 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
                     case TranslogWriter.VERSION_CHECKSUMS:
                         assert path.getFileName().toString().endsWith(Translog.TRANSLOG_FILE_SUFFIX) == false : "old file ends with new suffix: " + path;
                         // legacy - we still have to support it somehow
-                        checkPoint = new Checkpoint(channel.size(), TranslogReader.UNKNOWN_OP_COUNT);
+                        checkPoint = new Checkpoint(channel.size(), TranslogReader.UNKNOWN_OP_COUNT, channelReference.getTranslogId());
                         break;
                     case TranslogWriter.VERSION_CHECKPOINTS:
                         assert path.getFileName().toString().endsWith(Translog.TRANSLOG_FILE_SUFFIX) : "new file ends with old suffix: " + path;
-                        checkPoint = openCheckpoint(path);
-                        assert checkPoint.syncedPosition <= channel.size() : "checkpoint is inconsistent with channel length:" + channel.size() + " " + checkPoint;
+                        if (committed) {
+                            checkPoint = readCheckpointFromFooter(channelReference.getChannel());
+                        } else {
+                            checkPoint = openCheckpoint(path.getParent());
+                        }
+                        assert checkPoint.offset <= channel.size() : "checkpoint is inconsistent with channel length:" + channel.size() + " " + checkPoint;
                         break;
                     default:
                         throw new TranslogCorruptedException("No known translog stream version: " + version + " path:" + path);
                 }
-                return new ImmutableTranslogReader(channelReference.getTranslogId(), channelReference, checkPoint.syncedPosition, checkPoint.numWrittenOperations);
+                return new ImmutableTranslogReader(channelReference.getTranslogId(), channelReference, checkPoint.offset, checkPoint.numOps);
 
             } else if (b1 == UNVERSIONED_TRANSLOG_HEADER_BYTE) {
                 return new LegacyTranslogReader(channelReference.getTranslogId(), channelReference);
@@ -231,8 +244,8 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
         }
     }
 
-    public static Checkpoint openCheckpoint(Path translogFile) throws IOException {
-        try (InputStream in = Files.newInputStream(TranslogWriter.checkpointFile(translogFile))) {
+    public static Checkpoint openCheckpoint(Path path) throws IOException {
+        try (InputStream in = Files.newInputStream(path.resolve(TranslogWriter.CHECKPOINT_FIEL_NAME))) {
             return new Checkpoint(new InputStreamDataInput(in));
         }
     }
@@ -241,5 +254,11 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
     public Path path() {
         return channelReference.getPath();
     }
+
+    private static final Checkpoint readCheckpointFromFooter(FileChannel channel) throws IOException {
+        return new Checkpoint(channel, channel.size()-Checkpoint.BUFFER_SIZE);
+    }
+
+
 
 }

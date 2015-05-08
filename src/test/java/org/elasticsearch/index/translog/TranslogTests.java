@@ -21,6 +21,7 @@ package org.elasticsearch.index.translog;
 
 import com.carrotsearch.randomizedtesting.annotations.Seed;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.ByteArrayDataOutput;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.LuceneTestCase;
@@ -77,7 +78,7 @@ public class TranslogTests extends ElasticsearchTestCase {
 
         if (translog.isOpen()) {
             if (translog.currentId() > 1) {
-                translog.markCommitted(translog.currentId());
+                translog.commit();
                 assertFileDeleted(translog, translog.currentId() - 1);
             }
             translog.close();
@@ -200,7 +201,7 @@ public class TranslogTests extends ElasticsearchTestCase {
         snapshot.close();
 
         long firstId = translog.currentId();
-        translog.newTranslog();
+        translog.prepareCommit();
         assertThat(translog.currentId(), Matchers.not(equalTo(firstId)));
 
         snapshot = translog.newSnapshot();
@@ -208,7 +209,7 @@ public class TranslogTests extends ElasticsearchTestCase {
         assertThat(snapshot.estimatedTotalOperations(), equalTo(ops.size()));
         snapshot.close();
 
-        translog.markCommitted(translog.currentId());
+        translog.commit();
         snapshot = translog.newSnapshot();
         assertThat(snapshot, SnapshotMatchers.size(0));
         assertThat(snapshot.estimatedTotalOperations(), equalTo(0));
@@ -255,12 +256,12 @@ public class TranslogTests extends ElasticsearchTestCase {
         lastSize = stats.translogSizeInBytes().bytes();
 
         translog.add(new Translog.Delete(newUid("4")));
-        translog.newTranslog();
+        translog.prepareCommit();
         stats = stats();
         assertThat(stats.estimatedNumberOfOperations(), equalTo(4l));
         assertThat(stats.translogSizeInBytes().bytes(), greaterThan(lastSize));
 
-        translog.markCommitted(2);
+        translog.commit();
         stats = stats();
         assertThat(stats.estimatedNumberOfOperations(), equalTo(0l));
         assertThat(stats.translogSizeInBytes().bytes(), equalTo(17l));
@@ -305,11 +306,11 @@ public class TranslogTests extends ElasticsearchTestCase {
 
         addToTranslogAndList(translog, ops, new Translog.Index("test", "2", new byte[]{2}));
 
-        translog.newTranslog();
-
+        translog.prepareCommit();
         addToTranslogAndList(translog, ops, new Translog.Index("test", "3", new byte[]{3}));
 
         Translog.Snapshot snapshot2 = translog.newSnapshot();
+        translog.commit();
         assertThat(snapshot2, SnapshotMatchers.equalsTo(ops));
         assertThat(snapshot2.estimatedTotalOperations(), equalTo(ops.size()));
 
@@ -326,8 +327,8 @@ public class TranslogTests extends ElasticsearchTestCase {
         try {
             Translog.Snapshot snapshot = translog.newSnapshot();
             fail("translog is closed");
-        } catch (TranslogException ex) {
-            assertThat(ex.getMessage(), containsString("can't increment channel"));
+        } catch (AlreadyClosedException ex) {
+            assertThat(ex.getMessage(), containsString("translog [1] is already closed"));
         }
     }
 
@@ -338,8 +339,7 @@ public class TranslogTests extends ElasticsearchTestCase {
 
         Translog.Snapshot firstSnapshot = translog.newSnapshot();
         assertThat(firstSnapshot.estimatedTotalOperations(), equalTo(1));
-        translog.newTranslog();
-        translog.markCommitted(translog.currentId());
+        translog.commit();
         assertFileIsPresent(translog, 1);
 
 
@@ -359,8 +359,7 @@ public class TranslogTests extends ElasticsearchTestCase {
         assertFileIsPresent(translog, 2);
         secondSnapshot.close();
         assertFileIsPresent(translog, 2); // it's the current nothing should be deleted
-        translog.newTranslog();
-        translog.markCommitted(translog.currentId());
+        translog.commit();
         assertFileIsPresent(translog, 3); // it's the current nothing should be deleted
         assertFileDeleted(translog, 2);
 
@@ -745,7 +744,6 @@ public class TranslogTests extends ElasticsearchTestCase {
 
         barrier.await();
         try {
-            long previousId = translog.currentId();
             for (int iterations = scaledRandomIntBetween(10, 200); iterations > 0 && errors.isEmpty(); iterations--) {
                 writtenOpsLatch.set(new CountDownLatch(flushEveryOps));
                 while (writtenOpsLatch.get().await(200, TimeUnit.MILLISECONDS) == false) {
@@ -753,9 +751,7 @@ public class TranslogTests extends ElasticsearchTestCase {
                         break;
                     }
                 }
-                long newId = translog.newTranslog();
-                translog.markCommitted(previousId);
-                previousId = newId;
+                translog.commit();
             }
         } finally {
             run.set(false);
@@ -793,7 +789,7 @@ public class TranslogTests extends ElasticsearchTestCase {
                 assertTrue("we only synced a previous operation yet", translog.syncNeeded());
             }
             if (rarely()) {
-                translog.newTranslog();
+                translog.commit();
                 assertFalse("location is from a previous translog - already synced", translog.ensureSynced(location)); // not syncing now
                 assertFalse("no sync needed since no operations in current translog", translog.syncNeeded());
             }
@@ -812,7 +808,7 @@ public class TranslogTests extends ElasticsearchTestCase {
         for (int op = 0; op < translogOperations; op++) {
             locations.add(translog.add(new Translog.Create("test", "" + op, Integer.toString(++count).getBytes(Charset.forName("UTF-8")))));
             if (rarely() && translogOperations > op+1) {
-                translog.newTranslog();
+                translog.commit();
             }
         }
         Collections.shuffle(locations, random());
@@ -848,7 +844,7 @@ public class TranslogTests extends ElasticsearchTestCase {
         assertEquals(translogOperations, translog.totalOperations());
         final Translog.Location lastLocation = translog.add(new Translog.Create("test", "" + translogOperations, Integer.toString(translogOperations).getBytes(Charset.forName("UTF-8"))));
 
-        try (final ImmutableTranslogReader reader = translog.openReader(translog.location().resolve(translog.getFilename(translog.currentId())))) {
+        try (final ImmutableTranslogReader reader = translog.openReader(translog.location().resolve(translog.getFilename(translog.currentId())), false)) {
             assertEquals(lastSynced + 1, reader.totalOperations());
             for (int op = 0; op < translogOperations; op++) {
                 Translog.Location location = locations.get(op);
@@ -870,12 +866,12 @@ public class TranslogTests extends ElasticsearchTestCase {
             } catch (EOFException ex) {
             }
         }
-        assertEquals(translogOperations+1, translog.totalOperations());
+        assertEquals(translogOperations + 1, translog.totalOperations());
         translog.close();
     }
 
     public void testTranslogWriter() throws IOException {
-        final TranslogWriter writer = translog.createWriter();
+        final TranslogWriter writer = translog.createWriter(0, true);
         final int numOps = randomIntBetween(10, 100);
         byte[] bytes = new byte[4];
         ByteArrayDataOutput out = new ByteArrayDataOutput(bytes);
@@ -886,7 +882,7 @@ public class TranslogTests extends ElasticsearchTestCase {
         }
         writer.sync();
 
-        final TranslogReader reader = randomBoolean() ? writer : translog.openReader(writer.path());
+        final TranslogReader reader = randomBoolean() ? writer : translog.openReader(writer.path(), false);
         for (int i = 0; i < numOps; i++) {
             ByteBuffer buffer = ByteBuffer.allocate(4);
             reader.readBytes(buffer, reader.firstPosition() + 4*i);

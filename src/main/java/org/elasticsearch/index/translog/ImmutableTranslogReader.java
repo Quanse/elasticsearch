@@ -93,4 +93,8 @@ public class ImmutableTranslogReader extends TranslogReader {
         return new TranslogSnapshot(Arrays.asList(newChannelSnapshot()));
     }
 
+    public Checkpoint getInfo() {
+        return new Checkpoint(length, totalOperations, translogId());
+    }
+
 }

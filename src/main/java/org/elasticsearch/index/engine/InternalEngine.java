@@ -45,6 +45,7 @@ import org.apache.lucene.store.LockObtainFailedException;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.InfoStream;
+import org.apache.lucene.util.Version;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.cluster.routing.DjbHashFunction;
 import org.elasticsearch.common.Nullable;
@@ -70,7 +71,6 @@ import org.elasticsearch.indices.IndicesWarmer;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.threadpool.ThreadPool;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
@@ -148,7 +148,7 @@ public class InternalEngine extends Engine {
             try {
                 writer = createWriter();
                 indexWriter = writer;
-                translog = new Translog(engineConfig.getShardId(), engineConfig.getIndesSettingService(), engineConfig.getBigArrays(), engineConfig.getTranslogPath(), engineConfig.getThreadPool());
+                translog = openTranslog(engineConfig, skipInitialTranslogRecovery);
                 committedTranslogId = loadCommittedTranslogId(writer, translog);
             } catch (IOException e) {
                 throw new EngineCreationFailureException(shardId, "failed to create engine", e);
@@ -185,6 +185,11 @@ public class InternalEngine extends Engine {
         logger.trace("created new InternalEngine");
     }
 
+    private Translog openTranslog(EngineConfig engineConfig, boolean skipInitialTranslogRecovery) throws IOException {
+        // TODO checkout if we need to recovery at all...
+        return new Translog(engineConfig.getShardId(), engineConfig.getIndesSettingService(), engineConfig.getBigArrays(), engineConfig.getTranslogPath(), engineConfig.getThreadPool(), skipInitialTranslogRecovery ? Translog.OpenMode.CREATE : Translog.OpenMode.RECOVER);
+    }
+
     @Override
     public Translog getTranslog() {
         ensureOpen();
@@ -192,19 +197,6 @@ public class InternalEngine extends Engine {
     }
 
     protected void recoverFromTranslog(EngineConfig engineConfig, Long committedTranslogId) throws IOException {
-        if (committedTranslogId != null) {
-            try {
-                // trim unneeded files
-                translog.markCommitted(committedTranslogId);
-            } catch (FileNotFoundException ex) {
-                if (engineConfig.getIgnoreUnknownTranslog()) {
-                    logger.warn("ignoring committed translog id [{}] ([{}] set to true)", committedTranslogId,
-                            EngineConfig.INDEX_IGNORE_UNKNOWN_TRANSLOG);
-                } else {
-                    throw ex;
-                }
-            }
-        }
         int opsRecovered = 0;
         final TranslogRecoveryPerformer handler = engineConfig.getTranslogRecoveryPerformer();
         try (Translog.Snapshot snapshot = translog.newSnapshot()) {
@@ -225,6 +217,7 @@ public class InternalEngine extends Engine {
         } catch (Throwable e) {
             throw new EngineException(shardId, "failed to recover from translog", e);
         }
+
         // flush if we recovered something or if we have references to older translogs
         // note: if opsRecovered == 0 and we have older translogs it means they are corrupted or 0 length.
         if (opsRecovered > 0 ||
@@ -704,13 +697,14 @@ public class InternalEngine extends Engine {
                         flushNeeded = false;
                         final long translogId;
                         try {
-                            translogId = translog.newTranslog();
+                            translog.prepareCommit();
+                            translogId = translog.currentId();
                             logger.trace("starting commit for flush; commitTranslog=true");
                             commitIndexWriter(indexWriter, translogId);
                             logger.trace("finished commit for flush");
                             // we need to refresh in order to clear older version values
                             refresh("version_table_flush");
-                            translog.markCommitted(translogId);
+                            translog.commit();;
 
                         } catch (Throwable e) {
                             throw new FlushFailedEngineException(shardId, e);
