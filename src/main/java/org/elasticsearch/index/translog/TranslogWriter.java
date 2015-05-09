@@ -77,7 +77,7 @@ public class TranslogWriter extends TranslogReader {
             OutputStreamDataOutput out = new OutputStreamDataOutput(java.nio.channels.Channels.newOutputStream(channel));
             CodecUtil.writeHeader(out, TRANSLOG_CODEC, VERSION);
             channel.force(false);
-            writeCheckpoint(headerLength, 0, file.getParent(), id, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
+            writeCheckpoint(headerLength, 0, file.getParent(), id, StandardOpenOption.WRITE);
         }
         Files.move(pendingFile, file, StandardCopyOption.ATOMIC_MOVE);
         FileChannel channel = FileChannel.open(file, StandardOpenOption.READ, StandardOpenOption.WRITE);
@@ -297,10 +297,7 @@ public class TranslogWriter extends TranslogReader {
 
     private static void writeCheckpoint(long syncPosition, int numOperations, Path translogFile, long translogId, OpenOption... options) throws IOException {
         final Path checkpointFile = translogFile.resolve(Translog.CHECKPOINT_FIEL_NAME);
-        try (FileChannel channel = FileChannel.open(checkpointFile, options)) {
-            Checkpoint checkpoint = new Checkpoint(syncPosition, numOperations, translogId);
-            checkpoint.write(channel);
-            channel.force(false);
-        }
+        Checkpoint checkpoint = new Checkpoint(syncPosition, numOperations, translogId);
+        Checkpoint.write(checkpointFile, checkpoint, options);
     }
 }

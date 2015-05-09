@@ -80,7 +80,6 @@ import org.elasticsearch.index.store.DirectoryUtils;
 import org.elasticsearch.index.store.Store;
 import org.elasticsearch.index.translog.Translog;
 import org.elasticsearch.index.translog.TranslogConfig;
-import org.elasticsearch.index.translog.TranslogWriter;
 import org.elasticsearch.test.DummyShardLock;
 import org.elasticsearch.test.ElasticsearchTestCase;
 import org.elasticsearch.test.junit.annotations.TestLogging;
@@ -223,7 +222,7 @@ public class InternalEngineTests extends ElasticsearchTestCase {
     }
 
     protected Translog createTranslog(Path translogPath) throws IOException {
-        TranslogConfig translogConfig = new TranslogConfig(Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, threadPool, EMPTY_SETTINGS, shardId, translogPath);
+        TranslogConfig translogConfig = new TranslogConfig(shardId, translogPath, EMPTY_SETTINGS, Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, threadPool);
         return new Translog(translogConfig);
     }
 
@@ -258,7 +257,7 @@ public class InternalEngineTests extends ElasticsearchTestCase {
 
     public EngineConfig config(IndexSettingsService indexSettingsService, Store store, Path translogPath, MergeSchedulerProvider mergeSchedulerProvider) {
         IndexWriterConfig iwc = newIndexWriterConfig();
-        TranslogConfig translogConfig = new TranslogConfig(Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, threadPool, indexSettingsService.getSettings(), shardId, translogPath);
+        TranslogConfig translogConfig = new TranslogConfig(shardId, translogPath, indexSettingsService.getSettings(), Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, threadPool);
 
         EngineConfig config = new EngineConfig(shardId, threadPool, new ShardIndexingService(shardId, EMPTY_SETTINGS, new ShardSlowLogIndexingService(shardId, EMPTY_SETTINGS, indexSettingsService)), indexSettingsService
                 , null, store, createSnapshotDeletionPolicy(), createMergePolicy(), mergeSchedulerProvider,
@@ -1553,9 +1552,7 @@ public class InternalEngineTests extends ElasticsearchTestCase {
         // fake a new translog, causing the engine to point to a missing one.
         Translog translog = createTranslog();
         long id = translog.currentId();
-        Path path = translog.location();
-        IOUtils.rm(path);
-        Files.createDirectories(path);
+        IOUtils.rm(translog.location().resolve(Translog.getFilename(id)));
         // we have to re-open the translog because o.w. it will complain about commit information going backwards, which is OK as we did a fake markComitted
         translog.close();
         try {

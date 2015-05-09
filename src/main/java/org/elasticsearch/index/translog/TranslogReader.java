@@ -35,6 +35,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -170,11 +171,13 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
      *
      * @throws IOException
      */
-    public static ImmutableTranslogReader open(ChannelReference channelReference, boolean committed) throws IOException {
+    public static ImmutableTranslogReader open(ChannelReference channelReference, Checkpoint checkpoint) throws IOException {
         final FileChannel channel = channelReference.getChannel();
         final Path path = channelReference.getPath();
+        assert channelReference.getTranslogId() == checkpoint.translogId : "expected id: " + channelReference.getTranslogId() + " but got: " + checkpoint.translogId;
+
         try {
-            if (path.getFileName().toString().endsWith(Translog.TRANSLOG_FILE_SUFFIX) == false && channel.size() == 0) { // only old files can be empty
+            if (checkpoint.offset == 0 && checkpoint.numOps == TranslogReader.UNKNOWN_OP_COUNT) { // only old files can be empty
                 return new LegacyTranslogReader(channelReference.getTranslogId(), channelReference);
             }
 
@@ -210,28 +213,25 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
                 // Confirm the rest of the header using CodecUtil, extracting
                 // the translog version
                 int version = CodecUtil.checkHeaderNoMagic(new InputStreamDataInput(headerStream), TranslogWriter.TRANSLOG_CODEC, 1, Integer.MAX_VALUE);
-                final Checkpoint checkPoint;
                 switch (version) {
                     case TranslogWriter.VERSION_CHECKSUMS:
-                        assert path.getFileName().toString().endsWith(Translog.TRANSLOG_FILE_SUFFIX) == false : "old file ends with new suffix: " + path;
+                        assert checkpoint.numOps == TranslogReader.UNKNOWN_OP_COUNT : "expected unknown op count but got: " + checkpoint.numOps;
+                        assert checkpoint.offset == Files.size(path) : "offset(" + checkpoint.offset + ") != file_size(" + Files.size(path) + ") for: " + path;
                         // legacy - we still have to support it somehow
-                        checkPoint = new Checkpoint(channel.size(), TranslogReader.UNKNOWN_OP_COUNT, channelReference.getTranslogId());
                         break;
                     case TranslogWriter.VERSION_CHECKPOINTS:
                         assert path.getFileName().toString().endsWith(Translog.TRANSLOG_FILE_SUFFIX) : "new file ends with old suffix: " + path;
-                        if (committed) {
-                            checkPoint = readCheckpointFromFooter(channelReference.getChannel());
-                        } else {
-                            checkPoint = Checkpoint.read(path.resolveSibling(Translog.CHECKPOINT_FIEL_NAME));
-                        }
-                        assert checkPoint.offset <= channel.size() : "checkpoint is inconsistent with channel length:" + channel.size() + " " + checkPoint;
+                        assert checkpoint.numOps > TranslogReader.UNKNOWN_OP_COUNT: "expected at least 0 operatin but got: " + checkpoint.numOps;
+                        assert checkpoint.offset <= channel.size() : "checkpoint is inconsistent with channel length:" + channel.size() + " " + checkpoint;
                         break;
                     default:
                         throw new TranslogCorruptedException("No known translog stream version: " + version + " path:" + path);
                 }
-                return new ImmutableTranslogReader(channelReference.getTranslogId(), channelReference, checkPoint.offset, checkPoint.numOps);
+                return new ImmutableTranslogReader(channelReference.getTranslogId(), channelReference, checkpoint.offset, checkpoint.numOps);
 
             } else if (b1 == UNVERSIONED_TRANSLOG_HEADER_BYTE) {
+                assert checkpoint.numOps == TranslogReader.UNKNOWN_OP_COUNT : "expected unknown op count but got: " + checkpoint.numOps;
+                assert checkpoint.offset == Files.size(path) : "offset(" + checkpoint.offset + ") != file_size(" + Files.size(path) + ") for: " + path;
                 return new LegacyTranslogReader(channelReference.getTranslogId(), channelReference);
             } else {
                 throw new TranslogCorruptedException("Invalid first byte in translog file, got: " + Long.toHexString(b1) + ", expected 0x00 or 0x3f");
@@ -241,17 +241,7 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
         }
     }
 
-
-
-
     public Path path() {
         return channelReference.getPath();
     }
-
-    private static final Checkpoint readCheckpointFromFooter(FileChannel channel) throws IOException {
-        return new Checkpoint(channel, channel.size()-Checkpoint.BUFFER_SIZE);
-    }
-
-
-
 }

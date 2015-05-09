@@ -76,7 +76,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
 
     static final Pattern PARSE_ID_PATTERN = Pattern.compile(TRANSLOG_FILE_PREFIX + "(\\d+)((\\.recovering)|(\\.tlog))?$");
 
-    private final ArrayList<ImmutableTranslogReader> recoveredTranslogs;
+    private final List<ImmutableTranslogReader> recoveredTranslogs;
     private volatile ScheduledFuture<?> syncScheduler;
 
 
@@ -100,10 +100,20 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     private final TranslogConfig config;
 
     public Translog(TranslogConfig config) throws IOException {
-        this(config, OpenMode.RECOVER);
+        this(config, null);
     }
 
-    public Translog(TranslogConfig config, OpenMode openMode) throws IOException {
+    /**
+     * //nocommit
+     *  - try to find a better way of signaling if we need to create a new translog
+     *  - we might need something like a deletion policy to hold on to more than one translog eventually (I think sequence IDs needs this) but we can refactor as we go
+     *  - use a simple BufferedOuputStream to write stuff and fold BufferedTranslogWriter into it's super class... the tricky bit is we need to be able to do random access reads even from the buffer
+     *  - somehow we should move the sync task somewhere else
+     *  - we need random exception tests for all this.
+     *  - do we need to page align the last write before we sync?
+     *  - add a boat load of documentaion how this works
+     */
+    public Translog(TranslogConfig config,  Long lastCommittedTranslogId) throws IOException {
         super(config.getShardId(), config.getIndexSettings());
         this.config = config;
         bigArrays = config.getBigArrays();
@@ -116,23 +126,26 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             syncScheduler = config.getThreadPool().schedule(config.getSyncInterval(), ThreadPool.Names.SAME, new Sync());
         }
 
-        this.recoveredTranslogs = new ArrayList<>();
         try {
-            switch (openMode) {
-                case RECOVER:
-                    long recoveredNextTranslogId = recoverFromFiles(recoveredTranslogs);
-                    current = createWriter(Math.max(1, recoveredNextTranslogId+1), recoveredNextTranslogId == -1);
-                    break;
-                case CREATE:
-                    IOUtils.rm(location);
-                    Files.createDirectories(location);
-                    current = createWriter(1, true);
-                    break;
-                case OPEN:
-                    final Checkpoint checkpoint = Checkpoint.read(location.resolve(CHECKPOINT_FIEL_NAME));
-                    recoveredTranslogs.add(openReader(location.resolve(getFilename(checkpoint.translogId)), false));
-                    lastCommittedTranslogId = -1; // playing safe
-                    current = createWriter(checkpoint.translogId+1, false);
+            if (lastCommittedTranslogId != null) {
+                final Checkpoint checkpoint = Checkpoint.read(location.resolve(CHECKPOINT_FIEL_NAME));
+                this.recoveredTranslogs = recoverFromFiles(lastCommittedTranslogId, checkpoint);
+                if (recoveredTranslogs.isEmpty()) {
+                    throw new IllegalStateException("At least one reader must be recoverd");
+                }
+                current = createWriter(checkpoint.translogId + 1);
+                this.lastCommittedTranslogId = lastCommittedTranslogId;
+            } else {
+                this.recoveredTranslogs = Collections.EMPTY_LIST;
+                IOUtils.rm(location);
+                logger.debug("wipe translog location - creating new translog");
+                Files.createDirectories(location);
+                final long translogID = 1;
+                Checkpoint checkpoint = new Checkpoint(0, 0, translogID);
+                Checkpoint.write(location.resolve(CHECKPOINT_FIEL_NAME), checkpoint, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+                current = createWriter(translogID);
+                this.lastCommittedTranslogId = -1; // playing safe
+
             }
             // now that we know which files are there, create a new current one.
         } catch (Throwable t) {
@@ -142,41 +155,83 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
         }
     }
 
+    public static void upgradeLegacyTranslog(ESLogger logger, TranslogConfig config, long lastCommittedTranslogId) throws IOException {
+        Path translogPath = config.getTranslogPath();
+        try {
+            Checkpoint checkpoint = Checkpoint.read(translogPath.resolve(CHECKPOINT_FIEL_NAME));
+            return; // we are upgarded all is well
+        } catch (NoSuchFileException | FileNotFoundException ex) {
+            logger.warn("Recovering translog but no checkpoint found");
+        }
+
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(translogPath, new DirectoryStream.Filter<Path>() {
+            @Override
+            public boolean accept(Path entry) throws IOException {
+                Matcher matcher = PARSE_ID_PATTERN.matcher(entry.getFileName().toString());
+                return matcher.matches();
+            }
+        })) {
+            long latestTranslogId = -1;
+            for (Path path : stream) {
+                Matcher matcher = PARSE_ID_PATTERN.matcher(path.getFileName().toString());
+                if (matcher.matches()) {
+                    long id = Long.parseLong(matcher.group(1));
+                    if (id >= lastCommittedTranslogId) {
+                        latestTranslogId = Math.max(lastCommittedTranslogId, id);
+                    }
+                    final Path target = path.resolveSibling(getFilename(id));
+                    logger.info("upgrading translog copy file from {} to {}", path, target);
+                    Files.move(path, target, StandardCopyOption.ATOMIC_MOVE);
+                    logger.info("write commit point for {}", target);
+                    Checkpoint checkpoint = new Checkpoint(Files.size(target), -1, id);
+                    Checkpoint.write(translogPath.resolve(getCommitFileName(id)), checkpoint, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+                }
+            }
+
+            if (latestTranslogId < lastCommittedTranslogId) {
+                throw new IllegalStateException("latest found translog has a lower ID that the excepcted uncommitted " + lastCommittedTranslogId + " > " + latestTranslogId);
+            }
+
+            Checkpoint checkpoint = new Checkpoint(Files.size(translogPath.resolve(getFilename(latestTranslogId))), -1, latestTranslogId);
+            Checkpoint.write(translogPath.resolve(CHECKPOINT_FIEL_NAME), checkpoint, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+            Files.delete(translogPath.resolve(getCommitFileName(latestTranslogId)));
+            IOUtils.fsync(translogPath, true);
+
+        }
+    }
+
     /** recover all translog files found on disk */
-    private long recoverFromFiles(ArrayList<ImmutableTranslogReader> recoveredTranslogs) throws IOException {
-        long recoveredNextTranslogId = -1;
+    private ArrayList<ImmutableTranslogReader> recoverFromFiles(long lastCommittedTranslogId, Checkpoint checkpoint) throws IOException {
         boolean success = false;
         ArrayList<ImmutableTranslogReader> foundTranslogs = new ArrayList<>();
         try (ReleasableLock lock = writeLock.acquire()) {
-            String checkpointTranslogFile = "";
-            try {
-                Checkpoint checkpoint = Checkpoint.read(location.resolve(CHECKPOINT_FIEL_NAME));
-                checkpointTranslogFile = getFilename(checkpoint.translogId);
-                foundTranslogs.add(openReader(location.resolve(checkpointTranslogFile), false));
-            } catch (NoSuchFileException | FileNotFoundException ex) {
-                logger.warn("Recovering translog but no checkpoint found");
-            }
-            try (DirectoryStream<Path> stream = Files.newDirectoryStream(location, TRANSLOG_FILE_PREFIX + "[0-9]*")) {
-                for (Path file : stream) {
-                    if (checkpointTranslogFile.equals(file.getFileName().toString()) == false) {
-                        final ImmutableTranslogReader reader = openReader(file, true);
-                        foundTranslogs.add(reader);
-                        logger.debug("found local translog with id [{}]", reader.id);
-                    }
+
+            logger.debug("open uncommitted translog checkpoint {}", checkpoint);
+            final String checkpointTranslogFile = getFilename(checkpoint.translogId);
+            for (long i = lastCommittedTranslogId; i < checkpoint.translogId; i++) {
+                Path committedTranslogFile = location.resolve(getFilename(i));
+                if (Files.exists(committedTranslogFile) == false) {
+                    throw new IllegalStateException("translog file doesn't exist with ID: " + i + " lastCommitted: " + lastCommittedTranslogId + " checkpoint: " + checkpoint.translogId + " - translog ids must be consecutive");
                 }
+                final ImmutableTranslogReader reader = openReader(committedTranslogFile, Checkpoint.read(location.resolve(getCommitFileName(i))));
+                foundTranslogs.add(reader);
+                logger.debug("recovered local translog from checkpoint {}", checkpoint);
             }
-            CollectionUtil.timSort(foundTranslogs);
-            recoveredTranslogs.addAll(foundTranslogs);
+            foundTranslogs.add(openReader(location.resolve(checkpointTranslogFile), checkpoint));
+            Path commitCheckpoint = location.resolve(getCommitFileName(checkpoint.translogId));
+            Files.copy(location.resolve(CHECKPOINT_FIEL_NAME), commitCheckpoint);
+            IOUtils.fsync(commitCheckpoint, false);
+            IOUtils.fsync(commitCheckpoint.getParent(), true);
             success = true;
-            return recoveredTranslogs.isEmpty() ? -1 : recoveredTranslogs.get(recoveredTranslogs.size()-1).translogId();
         } finally {
             if (success == false) {
                 IOUtils.closeWhileHandlingException(foundTranslogs);
             }
         }
+        return foundTranslogs;
     }
 
-    ImmutableTranslogReader openReader(Path path, boolean committed) throws IOException {
+    ImmutableTranslogReader openReader(Path path, Checkpoint checkpoint) throws IOException {
         final long id = parseIdFromFileName(path);
         if (id < 0) {
             throw new TranslogException(shardId, "failed to parse id from file name matching pattern " + path);
@@ -184,7 +239,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
         FileChannel channel = FileChannel.open(path, StandardOpenOption.READ);
         try {
             final ChannelReference raf = new ChannelReference(path, id, channel, new OnCloseRunnable());
-            ImmutableTranslogReader reader = ImmutableTranslogReader.open(raf, committed);
+            ImmutableTranslogReader reader = ImmutableTranslogReader.open(raf, checkpoint);
             channel = null;
             return reader;
         } finally {
@@ -285,7 +340,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
 
 
 
-    TranslogWriter createWriter(long id, boolean writeCheckpoints) throws IOException {
+    TranslogWriter createWriter(long id) throws IOException {
         TranslogWriter newFile;
         try {
             newFile = TranslogWriter.create(config.getType(), shardId, id, location.resolve(getFilename(id)), new OnCloseRunnable(), config.getBufferSize());
@@ -418,11 +473,11 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     }
 
     /** package private for testing */
-    public String getFilename(long translogId) {
+    public static String getFilename(long translogId) {
         return TRANSLOG_FILE_PREFIX + translogId + TRANSLOG_FILE_SUFFIX;
     }
 
-    private String getCommitFileName(long translogId) {
+    static String getCommitFileName(long translogId) {
         return TRANSLOG_FILE_PREFIX + translogId + CHECKPOINT_SUFFIX;
     }
 
@@ -452,6 +507,10 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
 
     private boolean isReferencedTranslogId(long translogId) {
         return translogId >= lastCommittedTranslogId;
+    }
+
+    public TranslogConfig getConfig() {
+        return config;
     }
 
 
@@ -1483,7 +1542,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             IOUtils.fsync(commitCheckpoint, false);
             IOUtils.fsync(commitCheckpoint.getParent(), true);
             // create a new translog file - this will sync it and update the checkpoint data;
-            final TranslogWriter newFile = createWriter(current.translogId() + 1, true);
+            final TranslogWriter newFile = createWriter(current.translogId() + 1);
             current = newFile;
             // notify all outstanding views of the new translog (no views are created now as
             // we hold a write lock).
@@ -1524,11 +1583,4 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     public void rollback() throws IOException {
         close();
     }
-
-    public enum OpenMode {
-        CREATE,
-        RECOVER,
-        OPEN;
-    }
-
 }

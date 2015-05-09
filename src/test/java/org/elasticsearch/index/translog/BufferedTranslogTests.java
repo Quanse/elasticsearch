@@ -36,7 +36,7 @@ public class BufferedTranslogTests extends TranslogTests {
                 .put("index.translog.fs.type", TranslogWriter.Type.BUFFERED.name())
                 .put("index.translog.fs.buffer_size", 10 + randomInt(128 * 1024))
                 .build();
-        TranslogConfig translogConfig = new TranslogConfig(Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, null, build, shardId, translogDir);
+        TranslogConfig translogConfig = new TranslogConfig(shardId, translogDir, build, Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, null);
         return new Translog(translogConfig);
     }
 }

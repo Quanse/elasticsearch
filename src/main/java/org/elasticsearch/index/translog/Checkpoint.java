@@ -30,6 +30,7 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.OpenOption;
 import java.nio.file.Path;
 
 /**
@@ -89,6 +90,13 @@ class Checkpoint {
     public static Checkpoint read(Path path) throws IOException {
         try (InputStream in = Files.newInputStream(path)) {
             return new Checkpoint(new InputStreamDataInput(in));
+        }
+    }
+
+    public static void write(Path checkpointFile, Checkpoint checkpoint, OpenOption... options) throws IOException {
+        try (FileChannel channel = FileChannel.open(checkpointFile, options)) {
+            checkpoint.write(channel);
+            channel.force(false);
         }
     }
 

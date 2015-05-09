@@ -19,7 +19,6 @@
 
 package org.elasticsearch.index.translog;
 
-import com.carrotsearch.randomizedtesting.annotations.Seed;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.ByteArrayDataOutput;
@@ -112,7 +111,7 @@ public class TranslogTests extends ElasticsearchTestCase {
         Settings build = ImmutableSettings.settingsBuilder()
                 .put("index.translog.fs.type", TranslogWriter.Type.SIMPLE.name())
                 .build();
-        TranslogConfig translogConfig = new TranslogConfig(Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, null, build, shardId, translogDir);
+        TranslogConfig translogConfig = new TranslogConfig(shardId, translogDir, build, Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, null);
         return new Translog(translogConfig);
     }
 
@@ -847,7 +846,8 @@ public class TranslogTests extends ElasticsearchTestCase {
         assertEquals(translogOperations, translog.totalOperations());
         final Translog.Location lastLocation = translog.add(new Translog.Create("test", "" + translogOperations, Integer.toString(translogOperations).getBytes(Charset.forName("UTF-8"))));
 
-        try (final ImmutableTranslogReader reader = translog.openReader(translog.location().resolve(translog.getFilename(translog.currentId())), false)) {
+        final Checkpoint checkpoint = Checkpoint.read(translog.location().resolve(Translog.CHECKPOINT_FIEL_NAME));
+        try (final ImmutableTranslogReader reader = translog.openReader(translog.location().resolve(translog.getFilename(translog.currentId())), checkpoint)) {
             assertEquals(lastSynced + 1, reader.totalOperations());
             for (int op = 0; op < translogOperations; op++) {
                 Translog.Location location = locations.get(op);
@@ -874,7 +874,7 @@ public class TranslogTests extends ElasticsearchTestCase {
     }
 
     public void testTranslogWriter() throws IOException {
-        final TranslogWriter writer = translog.createWriter(0, true);
+        final TranslogWriter writer = translog.createWriter(0);
         final int numOps = randomIntBetween(10, 100);
         byte[] bytes = new byte[4];
         ByteArrayDataOutput out = new ByteArrayDataOutput(bytes);
@@ -885,7 +885,7 @@ public class TranslogTests extends ElasticsearchTestCase {
         }
         writer.sync();
 
-        final TranslogReader reader = randomBoolean() ? writer : translog.openReader(writer.path(), false);
+        final TranslogReader reader = randomBoolean() ? writer : translog.openReader(writer.path(), Checkpoint.read(translog.location().resolve(Translog.CHECKPOINT_FIEL_NAME)));
         for (int i = 0; i < numOps; i++) {
             ByteBuffer buffer = ByteBuffer.allocate(4);
             reader.readBytes(buffer, reader.firstPosition() + 4*i);
@@ -916,6 +916,96 @@ public class TranslogTests extends ElasticsearchTestCase {
             assertEquals(2048, value);
         }
         IOUtils.close(writer, reader);
+    }
+
+    public void testBasicRecovery() throws IOException {
+        List<Translog.Location> locations = newArrayList();
+        int translogOperations = randomIntBetween(10, 100);
+        Long lastCommittedTranslogId = null;
+        int minUncommittedOp = -1;
+        final boolean commitOften = randomBoolean();
+        for (int op = 0; op < translogOperations; op++) {
+            locations.add(translog.add(new Translog.Create("test", "" + op, Integer.toString(op).getBytes(Charset.forName("UTF-8")))));
+            final boolean commit = commitOften ? frequently() : rarely();
+            if (commit && op < translogOperations-1) {
+                translog.commit();
+                minUncommittedOp = op+1;
+                lastCommittedTranslogId = translog.currentId();
+            }
+        }
+        translog.sync();
+        TranslogConfig config = translog.getConfig();
+
+        translog.close();
+        translog = new Translog(config, lastCommittedTranslogId);
+        if (lastCommittedTranslogId == null) {
+            assertEquals(0, translog.stats().estimatedNumberOfOperations());
+            assertEquals(1, translog.currentId());
+            assertFalse(translog.syncNeeded());
+            try (Translog.Snapshot snapshot = translog.newSnapshot()) {
+                assertNull(snapshot.next());
+            }
+        } else {
+            assertEquals("lastCommitted must be 1 less than current", lastCommittedTranslogId + 1, translog.currentId());
+            assertFalse(translog.syncNeeded());
+            try (Translog.Snapshot snapshot = translog.newSnapshot()) {
+                for (int i = minUncommittedOp; i < translogOperations; i++) {
+                    assertEquals("expected operation" + i + " to be in the previous translog but wasn't", translog.currentId() - 1, locations.get(i).translogId);
+                    Translog.Operation next = snapshot.next();
+                    assertNotNull("operation " + i + " must be non-null", next);
+                    assertEquals(i, Integer.parseInt(next.getSource().source.toUtf8()));
+                }
+            }
+        }
+    }
+
+    public void testRecoveryUncommitted() throws IOException {
+        List<Translog.Location> locations = newArrayList();
+        int translogOperations = randomIntBetween(10, 100);
+        final int prepareOp = randomIntBetween(0, translogOperations-1);
+        final Long lastCommittedTranslogId = 1l; // we know it's the first one
+        final boolean sync = randomBoolean();
+        for (int op = 0; op < translogOperations; op++) {
+            locations.add(translog.add(new Translog.Create("test", "" + op, Integer.toString(op).getBytes(Charset.forName("UTF-8")))));
+            if (op == prepareOp) {
+                translog.prepareCommit();
+            }
+        }
+        if (sync) {
+            translog.sync();
+        }
+        // we intentionally don't close the tlog that is in the prepareCommit stage since we try to recovery the uncommitted
+        // translog here as well.
+        TranslogConfig config = translog.getConfig();
+        try (Translog translog = new Translog(config, lastCommittedTranslogId)) {
+            assertNotNull(lastCommittedTranslogId);
+            assertEquals("lastCommitted must be 2 less than current - we never finished the commit", lastCommittedTranslogId + 2, translog.currentId());
+            assertFalse(translog.syncNeeded());
+            try (Translog.Snapshot snapshot = translog.newSnapshot()) {
+                int upTo = sync ? translogOperations : prepareOp;
+                for (int i = 0; i < upTo; i++) {
+                    Translog.Operation next = snapshot.next();
+                    assertNotNull("operation " + i + " must be non-null synced: " + sync, next);
+                    assertEquals("payload missmatch, synced: " + sync, i, Integer.parseInt(next.getSource().source.toUtf8()));
+                }
+            }
+        }
+        if (randomBoolean()) { // recover twice
+            try (Translog translog = new Translog(config, lastCommittedTranslogId)) {
+                assertNotNull(lastCommittedTranslogId);
+                assertEquals("lastCommitted must be 3 less than current - we never finished the commit and run recovery twice", lastCommittedTranslogId + 3, translog.currentId());
+                assertFalse(translog.syncNeeded());
+                try (Translog.Snapshot snapshot = translog.newSnapshot()) {
+                    int upTo = sync ? translogOperations : prepareOp;
+                    for (int i = 0; i < upTo; i++) {
+                        Translog.Operation next = snapshot.next();
+                        assertNotNull("operation " + i + " must be non-null synced: " + sync, next);
+                        assertEquals("payload missmatch, synced: " + sync, i, Integer.parseInt(next.getSource().source.toUtf8()));
+                    }
+                }
+            }
+        }
+
     }
 
 }

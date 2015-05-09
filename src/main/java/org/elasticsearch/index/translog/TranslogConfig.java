@@ -19,6 +19,7 @@
 
 package org.elasticsearch.index.translog;
 
+import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
@@ -52,7 +53,7 @@ public class TranslogConfig {
     private final Path translogPath;
 
 
-    public TranslogConfig(Translog.Durabilty durabilty, BigArrays bigArrays, ThreadPool threadPool, @IndexSettings Settings indexSettings, ShardId shardId, Path translogPath) {
+    public TranslogConfig(ShardId shardId, Path translogPath, @IndexSettings Settings indexSettings, Translog.Durabilty durabilty, BigArrays bigArrays, @Nullable ThreadPool threadPool) {
         this.indexSettings = indexSettings;
         this.shardId = shardId;
         this.translogPath = translogPath;
@@ -70,7 +71,6 @@ public class TranslogConfig {
         } else {
             syncOnEachOperation = false;
         }
-
     }
 
     public ThreadPool getThreadPool() {
@@ -111,7 +111,6 @@ public class TranslogConfig {
     public TimeValue getSyncInterval() {
         return syncInterval;
     }
-
 
     public Settings getIndexSettings() {
         return indexSettings;

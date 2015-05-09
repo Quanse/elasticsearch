@@ -231,7 +231,7 @@ public class ShadowEngineTests extends ElasticsearchTestCase {
 
     public EngineConfig config(IndexSettingsService indexSettingsService, Store store, Path translogPath, MergeSchedulerProvider mergeSchedulerProvider) {
         IndexWriterConfig iwc = newIndexWriterConfig();
-        TranslogConfig translogConfig = new TranslogConfig(Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, threadPool, indexSettingsService.getSettings(), shardId, translogPath);
+        TranslogConfig translogConfig = new TranslogConfig(shardId, translogPath, indexSettingsService.getSettings(), Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, threadPool);
         EngineConfig config = new EngineConfig(shardId, threadPool, new ShardIndexingService(shardId, EMPTY_SETTINGS, new ShardSlowLogIndexingService(shardId, EMPTY_SETTINGS, indexSettingsService)), indexSettingsService
                 , null, store, createSnapshotDeletionPolicy(), createMergePolicy(), mergeSchedulerProvider,
                 iwc.getAnalyzer(), iwc.getSimilarity() , new CodecService(shardId.index()), new Engine.FailedEngineListener() {

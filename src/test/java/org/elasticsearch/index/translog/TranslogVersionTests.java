@@ -158,7 +158,7 @@ public class TranslogVersionTests extends ElasticsearchTestCase {
         FileChannel channel = FileChannel.open(path, StandardOpenOption.READ);
         try {
             final ChannelReference raf = new ChannelReference(path, id, channel, null);
-            ImmutableTranslogReader reader = ImmutableTranslogReader.open(raf, false);
+            ImmutableTranslogReader reader = ImmutableTranslogReader.open(raf, new Checkpoint(Files.size(path), TranslogReader.UNKNOWN_OP_COUNT, id));
             channel = null;
             return reader;
         } finally {

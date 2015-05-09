@@ -255,8 +255,8 @@ public class IndexShard extends AbstractIndexShardComponent {
         logger.debug("state: [CREATED]");
 
         this.checkIndexOnStartup = indexSettings.get("index.shard.check_on_startup", "false");
-        this.translogConfig = new TranslogConfig(getFromSettings(logger, indexSettings, Translog.Durabilty.REQUEST),
-                bigArrays, threadPool, indexSettings, shardId, shardPath().resolveTranslog());
+        this.translogConfig = new TranslogConfig(shardId, shardPath().resolveTranslog(), indexSettings, getFromSettings(logger, indexSettings, Translog.Durabilty.REQUEST),
+                bigArrays, threadPool);
         this.engineConfig = newEngineConfig(translogConfig);
 
         this.indexShardOperationCounter = new IndexShardOperationCounter(logger, shardId);
@@ -1046,7 +1046,6 @@ public class IndexShard extends AbstractIndexShardComponent {
                     IndexShard.this.flushOnClose = flushOnClose;
                 }
 
-                engine().getTranslog();
                 TranslogWriter.Type type = TranslogWriter.Type.fromString(settings.get(TranslogConfig.INDEX_TRANSLOG_FS_TYPE, translogConfig.getType().name()));
                 if (type != translogConfig.getType()) {
                     logger.info("updating type from [{}] to [{}]", translogConfig.getType(), type);

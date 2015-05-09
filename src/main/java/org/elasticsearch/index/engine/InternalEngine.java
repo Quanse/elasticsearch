@@ -45,8 +45,8 @@ import org.apache.lucene.store.LockObtainFailedException;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.InfoStream;
-import org.apache.lucene.util.Version;
 import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.Version;
 import org.elasticsearch.cluster.routing.DjbHashFunction;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.lease.Releasable;
@@ -86,7 +86,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  */
 public class InternalEngine extends Engine {
-
+    private static final String INDEX_VERSION_COMMITTED = "index.version.committed";
     private final FailEngineOnMergeFailure mergeSchedulerFailureListener;
     private final MergeSchedulerListener mergeSchedulerListener;
 
@@ -148,8 +148,10 @@ public class InternalEngine extends Engine {
             try {
                 writer = createWriter();
                 indexWriter = writer;
-                translog = openTranslog(engineConfig, skipInitialTranslogRecovery);
-                committedTranslogId = loadCommittedTranslogId(writer, translog);
+                translog = openTranslog(engineConfig, writer, skipInitialTranslogRecovery
+                        || engineConfig.getIgnoreUnknownTranslog()); // nocommit this is a weird name for this property
+                committedTranslogId = loadTranslogIdFromCommit(writer);
+                assert committedTranslogId != null;
             } catch (IOException e) {
                 throw new EngineCreationFailureException(shardId, "failed to create engine", e);
             }
@@ -185,9 +187,26 @@ public class InternalEngine extends Engine {
         logger.trace("created new InternalEngine");
     }
 
-    private Translog openTranslog(EngineConfig engineConfig, boolean skipInitialTranslogRecovery) throws IOException {
-        // TODO checkout if we need to recovery at all...
-        return new Translog(engineConfig.getTranslogConfig(), skipInitialTranslogRecovery ? Translog.OpenMode.CREATE : Translog.OpenMode.RECOVER);
+    private Translog openTranslog(EngineConfig engineConfig, IndexWriter writer, boolean createNew) throws IOException {
+        final Long currentTranlogId = loadTranslogIdFromCommit(writer);
+        Translog translog;
+        if (createNew) {
+            translog = new Translog(engineConfig.getTranslogConfig());
+        } else {
+            final Version indexCommittedAt = loadCommittedIndexVersion(writer);
+            if ((indexCommittedAt == null || indexCommittedAt.before(org.elasticsearch.Version.V_2_0_0)) && currentTranlogId != null) {
+                // only upgrade on pre-2.0 indices... TODO maybe we can do this even eariler?
+                Translog.upgradeLegacyTranslog(logger, engineConfig.getTranslogConfig(), currentTranlogId);
+            }
+            // TODO the currentTranslogID signals if we need to recover some files or do a full new creation maybe we can use an open mode or so?
+            translog = new Translog(engineConfig.getTranslogConfig(), currentTranlogId);
+        }
+
+        if (currentTranlogId == null) {
+            logger.debug("no translog ID present in the current commit - creating one");
+            commitIndexWriter(writer, translog.currentId());
+        }
+        return translog;
     }
 
     @Override
@@ -233,15 +252,22 @@ public class InternalEngine extends Engine {
      * translog id into lucene and returns null.
      */
     @Nullable
-    private Long loadCommittedTranslogId(IndexWriter writer, Translog translog) throws IOException {
+    private Long loadTranslogIdFromCommit(IndexWriter writer) throws IOException {
         // commit on a just opened writer will commit even if there are no changes done to it
         // we rely on that for the commit data translog id key
         final Map<String, String> commitUserData = writer.getCommitData();
         if (commitUserData.containsKey(Translog.TRANSLOG_ID_KEY)) {
             return Long.parseLong(commitUserData.get(Translog.TRANSLOG_ID_KEY));
         }
-        logger.debug("no translog ID present in the current commit - creating one");
-        commitIndexWriter(writer, translog.currentId());
+        return null;
+    }
+
+    @Nullable
+    private Version loadCommittedIndexVersion(IndexWriter writer) throws IOException {
+        final Map<String, String> commitUserData = writer.getCommitData();
+        if (commitUserData.containsKey(INDEX_VERSION_COMMITTED)) {
+            return Version.fromId(Integer.parseInt(commitUserData.get(INDEX_VERSION_COMMITTED)));
+        }
         return null;
     }
 
@@ -697,6 +723,7 @@ public class InternalEngine extends Engine {
                         flushNeeded = false;
                         final long translogId;
                         try {
+                            // nocommit - use two phase commit tool here
                             translog.prepareCommit();
                             translogId = translog.currentId();
                             logger.trace("starting commit for flush; commitTranslog=true");
@@ -704,7 +731,7 @@ public class InternalEngine extends Engine {
                             logger.trace("finished commit for flush");
                             // we need to refresh in order to clear older version values
                             refresh("version_table_flush");
-                            translog.commit();;
+                            translog.commit();
 
                         } catch (Throwable e) {
                             throw new FlushFailedEngineException(shardId, e);
@@ -1172,7 +1199,10 @@ public class InternalEngine extends Engine {
     private void commitIndexWriter(IndexWriter writer, long translogId) throws IOException {
         try {
             logger.trace("committing writer with translog id [{}] ", translogId);
-            indexWriter.setCommitData(Collections.singletonMap(Translog.TRANSLOG_ID_KEY, Long.toString(translogId)));
+            Map<String, String> commitData = new HashMap<>(2);
+            commitData.put(Translog.TRANSLOG_ID_KEY, Long.toString(translogId));
+            commitData.put(INDEX_VERSION_COMMITTED, Integer.toString(Version.CURRENT.id));
+            indexWriter.setCommitData(commitData);
             writer.commit();
         } catch (Throwable ex) {
             failEngine("lucene commit failed", ex);
