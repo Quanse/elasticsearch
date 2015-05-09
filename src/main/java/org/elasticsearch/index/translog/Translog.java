@@ -38,7 +38,6 @@ import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.lucene.uid.Versions;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
-import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.Callback;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
@@ -46,11 +45,8 @@ import org.elasticsearch.common.util.concurrent.FutureUtils;
 import org.elasticsearch.common.util.concurrent.ReleasableLock;
 import org.elasticsearch.index.VersionType;
 import org.elasticsearch.index.engine.Engine;
-import org.elasticsearch.index.settings.IndexSettings;
-import org.elasticsearch.index.settings.IndexSettingsService;
 import org.elasticsearch.index.shard.AbstractIndexShardComponent;
 import org.elasticsearch.index.shard.IndexShardComponent;
-import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import java.io.Closeable;
@@ -72,49 +68,23 @@ import java.util.regex.Pattern;
  */
 public class Translog extends AbstractIndexShardComponent implements IndexShardComponent, Closeable, TwoPhaseCommit {
 
-    public static ByteSizeValue INACTIVE_SHARD_TRANSLOG_BUFFER = ByteSizeValue.parseBytesSizeValue("1kb");
     public static final String TRANSLOG_ID_KEY = "translog_id";
-    public static final String INDEX_TRANSLOG_DURABILITY = "index.translog.durability";
-    public static final String INDEX_TRANSLOG_FS_TYPE = "index.translog.fs.type";
-    public static final String INDEX_TRANSLOG_BUFFER_SIZE = "index.translog.fs.buffer_size";
-    public static final String INDEX_TRANSLOG_SYNC_INTERVAL = "index.translog.sync_interval";
     public static final String TRANSLOG_FILE_PREFIX = "translog-";
     public static final String TRANSLOG_FILE_SUFFIX = ".tlog";
     public static final String CHECKPOINT_SUFFIX = ".ckp";
     public static final String CHECKPOINT_FIEL_NAME = "translog" + CHECKPOINT_SUFFIX;
 
     static final Pattern PARSE_ID_PATTERN = Pattern.compile(TRANSLOG_FILE_PREFIX + "(\\d+)((\\.recovering)|(\\.tlog))?$");
-    private final TimeValue syncInterval;
+
     private final ArrayList<ImmutableTranslogReader> recoveredTranslogs;
     private volatile ScheduledFuture<?> syncScheduler;
-    private volatile Durabilty durabilty = Durabilty.REQUEST;
 
 
     // this is a concurrent set and is not protected by any of the locks. The main reason
     // is that is being accessed by two separate classes (additions & reading are done by FsTranslog, remove by FsView when closed)
     private final Set<FsView> outstandingViews = ConcurrentCollections.newConcurrentSet();
+    private BigArrays bigArrays;
 
-
-    class ApplySettings implements IndexSettingsService.Listener {
-        @Override
-        public void onRefreshSettings(Settings settings) {
-            TranslogWriter.Type type = TranslogWriter.Type.fromString(settings.get(INDEX_TRANSLOG_FS_TYPE, Translog.this.type.name()));
-            if (type != Translog.this.type) {
-                logger.info("updating type from [{}] to [{}]", Translog.this.type, type);
-                Translog.this.type = type;
-            }
-
-            final Durabilty durabilty = Durabilty.getFromSettings(logger, settings, Translog.this.durabilty);
-            if (durabilty != Translog.this.durabilty) {
-                logger.info("updating durability from [{}] to [{}]", Translog.this.durabilty, durabilty);
-                Translog.this.durabilty = durabilty;
-            }
-        }
-    }
-
-    private final IndexSettingsService indexSettingsService;
-    private final BigArrays bigArrays;
-    private final ThreadPool threadPool;
 
     protected final ReleasableLock readLock;
     protected final ReleasableLock writeLock;
@@ -126,62 +96,29 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     private volatile ImmutableTranslogReader currentCommittingTranslog;
     private long lastCommittedTranslogId = -1; // -1 is safe as it will not cause an translog deletion.
 
-    private TranslogWriter.Type type;
-
-    private boolean syncOnEachOperation = false;
-
-    private volatile int bufferSize;
-
-    private final ApplySettings applySettings = new ApplySettings();
-
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final TranslogConfig config;
 
-    public Translog(ShardId shardId, IndexSettingsService indexSettingsService,
-                    BigArrays bigArrays, Path location, ThreadPool threadPool) throws IOException {
-        this(shardId, indexSettingsService.getSettings(), indexSettingsService, bigArrays, location, threadPool, OpenMode.RECOVER);
+    public Translog(TranslogConfig config) throws IOException {
+        this(config, OpenMode.RECOVER);
     }
 
-
-    public Translog(ShardId shardId, IndexSettingsService indexSettingsService,
-                    BigArrays bigArrays, Path location, ThreadPool threadPool, OpenMode mode) throws IOException {
-        this(shardId, indexSettingsService.getSettings(), indexSettingsService, bigArrays, location, threadPool, mode);
-    }
-
-    public Translog(ShardId shardId, @IndexSettings Settings indexSettings,
-                    BigArrays bigArrays, Path location) throws IOException {
-        this(shardId, indexSettings, null, bigArrays, location, null, OpenMode.RECOVER);
-    }
-
-    private Translog(ShardId shardId, @IndexSettings Settings indexSettings, @Nullable IndexSettingsService indexSettingsService,
-                     BigArrays bigArrays, Path location, @Nullable ThreadPool threadPool, OpenMode mode) throws IOException {
-        super(shardId, indexSettings);
+    public Translog(TranslogConfig config, OpenMode openMode) throws IOException {
+        super(config.getShardId(), config.getIndexSettings());
+        this.config = config;
+        bigArrays = config.getBigArrays();
         ReadWriteLock rwl = new ReentrantReadWriteLock();
         readLock = new ReleasableLock(rwl.readLock());
         writeLock = new ReleasableLock(rwl.writeLock());
-        this.durabilty = Durabilty.getFromSettings(logger, indexSettings, durabilty);
-        this.indexSettingsService = indexSettingsService;
-        this.bigArrays = bigArrays;
-        this.location = location;
+        this.location = config.getTranslogPath();
         Files.createDirectories(this.location);
-        this.threadPool = threadPool;
-
-        this.type = TranslogWriter.Type.fromString(indexSettings.get(INDEX_TRANSLOG_FS_TYPE, TranslogWriter.Type.BUFFERED.name()));
-        this.bufferSize = (int) indexSettings.getAsBytesSize(INDEX_TRANSLOG_BUFFER_SIZE, ByteSizeValue.parseBytesSizeValue("64k")).bytes(); // Not really interesting, updated by IndexingMemoryController...
-
-        syncInterval = indexSettings.getAsTime(INDEX_TRANSLOG_SYNC_INTERVAL, TimeValue.timeValueSeconds(5));
-        if (syncInterval.millis() > 0 && threadPool != null) {
-            this.syncOnEachOperation = false;
-            syncScheduler = threadPool.schedule(syncInterval, ThreadPool.Names.SAME, new Sync());
-        } else if (syncInterval.millis() == 0) {
-            this.syncOnEachOperation = true;
+        if (config.getSyncInterval().millis() > 0 && config.getThreadPool() != null) {
+            syncScheduler = config.getThreadPool().schedule(config.getSyncInterval(), ThreadPool.Names.SAME, new Sync());
         }
 
-        if (indexSettingsService != null) {
-            indexSettingsService.addListener(applySettings);
-        }
         this.recoveredTranslogs = new ArrayList<>();
         try {
-            switch (mode) {
+            switch (openMode) {
                 case RECOVER:
                     long recoveredNextTranslogId = recoverFromFiles(recoveredTranslogs);
                     current = createWriter(Math.max(1, recoveredNextTranslogId+1), recoveredNextTranslogId == -1);
@@ -270,9 +207,9 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     }
 
     public void updateBuffer(ByteSizeValue bufferSize) {
-        this.bufferSize = bufferSize.bytesAsInt();
+        config.setBufferSize(bufferSize.bytesAsInt());
         try (ReleasableLock lock = writeLock.acquire()) {
-            current.updateBufferSize(this.bufferSize);
+            current.updateBufferSize(config.getBufferSize());
         }
     }
 
@@ -283,10 +220,6 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     @Override
     public void close() throws IOException {
         if (closed.compareAndSet(false, true)) {
-            if (indexSettingsService != null) {
-                indexSettingsService.removeListener(applySettings);
-            }
-
             try (ReleasableLock lock = writeLock.acquire()) {
                 try {
                     IOUtils.close(current, currentCommittingTranslog);
@@ -355,7 +288,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     TranslogWriter createWriter(long id, boolean writeCheckpoints) throws IOException {
         TranslogWriter newFile;
         try {
-            newFile = TranslogWriter.create(type, shardId, id, location.resolve(getFilename(id)), new OnCloseRunnable(), bufferSize);
+            newFile = TranslogWriter.create(config.getType(), shardId, id, location.resolve(getFilename(id)), new OnCloseRunnable(), config.getBufferSize());
         } catch (IOException e) {
             throw new TranslogException(shardId, "failed to create new translog file", e);
         }
@@ -394,7 +327,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             ReleasablePagedBytesReference bytes = out.bytes();
             try (ReleasableLock lock = readLock.acquire()) {
                 Location location = current.add(bytes);
-                if (syncOnEachOperation) {
+                if (config.isSyncOnEachOperation()) {
                     current.sync();
                 }
                 assert current.assertBytesAtLocation(location, bytes);
@@ -644,6 +577,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             if (closed.get()) {
                 return;
             }
+            final ThreadPool threadPool = config.getThreadPool();
             if (syncNeeded()) {
                 threadPool.executor(ThreadPool.Names.FLUSH).execute(new Runnable() {
                     @Override
@@ -654,12 +588,12 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
                             logger.warn("failed to sync translog", e);
                         }
                         if (closed.get() == false) {
-                            syncScheduler = threadPool.schedule(syncInterval, ThreadPool.Names.SAME, Sync.this);
+                            syncScheduler = threadPool.schedule(config.getSyncInterval(), ThreadPool.Names.SAME, Sync.this);
                         }
                     }
                 });
             } else {
-                syncScheduler = threadPool.schedule(syncInterval, ThreadPool.Names.SAME, Sync.this);
+                syncScheduler = threadPool.schedule(config.getSyncInterval(), ThreadPool.Names.SAME, Sync.this);
             }
         }
     }
@@ -1448,13 +1382,6 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
         }
     }
 
-    /**
-     * Returns the current durability mode of this translog.
-     */
-    public Durabilty getDurabilty() {
-        return durabilty;
-    }
-
     public enum Durabilty {
         /**
          * Async durability - translogs are synced based on a time interval.
@@ -1465,15 +1392,6 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
          */
         REQUEST;
 
-        public static Durabilty getFromSettings(ESLogger logger, Settings settings, Durabilty defaultValue) {
-            final String value = settings.get(INDEX_TRANSLOG_DURABILITY, defaultValue.name());
-            try {
-                return valueOf(value.toUpperCase(Locale.ROOT));
-            } catch (IllegalArgumentException ex) {
-                logger.warn("Can't apply {} illegal value: {} using {} instead, use one of: {}", INDEX_TRANSLOG_DURABILITY, value, defaultValue, Arrays.toString(values()));
-                return defaultValue;
-            }
-        }
     }
 
     private static void verifyChecksum(BufferedChecksumStreamInput in) throws IOException {

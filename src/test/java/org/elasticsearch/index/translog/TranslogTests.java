@@ -31,6 +31,7 @@ import org.elasticsearch.common.io.FileSystemUtils;
 import org.elasticsearch.common.io.stream.BytesStreamInput;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.settings.ImmutableSettings;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
@@ -108,9 +109,11 @@ public class TranslogTests extends ElasticsearchTestCase {
     }
 
     protected Translog create() throws IOException {
-        return new Translog(shardId,
-                ImmutableSettings.settingsBuilder().put("index.translog.fs.type", TranslogWriter.Type.SIMPLE.name()).build(),
-                BigArrays.NON_RECYCLING_INSTANCE, translogDir);
+        Settings build = ImmutableSettings.settingsBuilder()
+                .put("index.translog.fs.type", TranslogWriter.Type.SIMPLE.name())
+                .build();
+        TranslogConfig translogConfig = new TranslogConfig(Translog.Durabilty.REQUEST, BigArrays.NON_RECYCLING_INSTANCE, null, build, shardId, translogDir);
+        return new Translog(translogConfig);
     }
 
     protected void addToTranslogAndList(Translog translog, ArrayList<Translog.Operation> list, Translog.Operation op) {

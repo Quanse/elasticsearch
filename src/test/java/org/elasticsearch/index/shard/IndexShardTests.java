@@ -27,6 +27,7 @@ import org.elasticsearch.common.settings.ImmutableSettings;
 import org.elasticsearch.env.NodeEnvironment;
 import org.elasticsearch.index.IndexService;
 import org.elasticsearch.index.translog.Translog;
+import org.elasticsearch.index.translog.TranslogConfig;
 import org.elasticsearch.indices.IndicesService;
 import org.elasticsearch.test.ElasticsearchSingleNodeTest;
 import org.junit.Test;
@@ -274,7 +275,7 @@ public class IndexShardTests extends ElasticsearchSingleNodeTest {
     }
 
     private void setDurability(IndexShard shard, Translog.Durabilty durabilty) {
-        client().admin().indices().prepareUpdateSettings(shard.shardId.getIndex()).setSettings(settingsBuilder().put(Translog.INDEX_TRANSLOG_DURABILITY, durabilty.name()).build()).get();
+        client().admin().indices().prepareUpdateSettings(shard.shardId.getIndex()).setSettings(settingsBuilder().put(TranslogConfig.INDEX_TRANSLOG_DURABILITY, durabilty.name()).build()).get();
         assertEquals(durabilty, shard.getTranslogDurability());
     }
 }

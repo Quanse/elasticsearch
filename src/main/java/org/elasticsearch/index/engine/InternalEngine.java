@@ -187,7 +187,7 @@ public class InternalEngine extends Engine {
 
     private Translog openTranslog(EngineConfig engineConfig, boolean skipInitialTranslogRecovery) throws IOException {
         // TODO checkout if we need to recovery at all...
-        return new Translog(engineConfig.getShardId(), engineConfig.getIndesSettingService(), engineConfig.getBigArrays(), engineConfig.getTranslogPath(), engineConfig.getThreadPool(), skipInitialTranslogRecovery ? Translog.OpenMode.CREATE : Translog.OpenMode.RECOVER);
+        return new Translog(engineConfig.getTranslogConfig(), skipInitialTranslogRecovery ? Translog.OpenMode.CREATE : Translog.OpenMode.RECOVER);
     }
 
     @Override
