@@ -21,12 +21,16 @@ package org.elasticsearch.index.translog;
 import org.apache.lucene.store.ByteArrayDataOutput;
 import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.DataOutput;
+import org.apache.lucene.store.InputStreamDataInput;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.elasticsearch.common.io.Channels;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /**
  */
@@ -80,6 +84,12 @@ class Checkpoint {
                 ", numOps=" + numOps +
                 ", translogId= " + translogId +
                 '}';
+    }
+
+    public static Checkpoint read(Path path) throws IOException {
+        try (InputStream in = Files.newInputStream(path)) {
+            return new Checkpoint(new InputStreamDataInput(in));
+        }
     }
 
 }

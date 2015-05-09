@@ -38,8 +38,8 @@ public final class BufferingTranslogWriter extends TranslogWriter {
     /* the total offset of this file including the bytes written to the file as well as into the buffer */
     private volatile long totalOffset;
 
-    public BufferingTranslogWriter(ShardId shardId, long id, ChannelReference channelReference, int bufferSize, boolean writeCheckpoints) throws IOException {
-        super(shardId, id, channelReference, writeCheckpoints);
+    public BufferingTranslogWriter(ShardId shardId, long id, ChannelReference channelReference, int bufferSize) throws IOException {
+        super(shardId, id, channelReference);
         this.buffer = new byte[bufferSize];
         this.totalOffset = writtenOffset;
     }
@@ -112,7 +112,7 @@ public final class BufferingTranslogWriter extends TranslogWriter {
             }
             // we can do this outside of the write lock but we have to protect from
             // concurrent syncs
-            checkpoint(lastSyncedOffset, operationCounter);
+            checkpoint(lastSyncedOffset, operationCounter, channelReference);
         }
     }
 

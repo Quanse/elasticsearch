@@ -19,7 +19,6 @@
 
 package org.elasticsearch.index.translog;
 
-import com.sun.tools.javac.comp.Check;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.index.IndexFormatTooNewException;
@@ -33,11 +32,9 @@ import org.elasticsearch.common.io.stream.StreamInput;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -225,7 +222,7 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
                         if (committed) {
                             checkPoint = readCheckpointFromFooter(channelReference.getChannel());
                         } else {
-                            checkPoint = openCheckpoint(path.getParent());
+                            checkPoint = Checkpoint.read(path.resolveSibling(Translog.CHECKPOINT_FIEL_NAME));
                         }
                         assert checkPoint.offset <= channel.size() : "checkpoint is inconsistent with channel length:" + channel.size() + " " + checkPoint;
                         break;
@@ -244,11 +241,7 @@ public abstract class TranslogReader implements Closeable, Comparable<TranslogRe
         }
     }
 
-    public static Checkpoint openCheckpoint(Path path) throws IOException {
-        try (InputStream in = Files.newInputStream(path.resolve(TranslogWriter.CHECKPOINT_FIEL_NAME))) {
-            return new Checkpoint(new InputStreamDataInput(in));
-        }
-    }
+
 
 
     public Path path() {

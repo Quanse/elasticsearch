@@ -80,6 +80,9 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     public static final String INDEX_TRANSLOG_SYNC_INTERVAL = "index.translog.sync_interval";
     public static final String TRANSLOG_FILE_PREFIX = "translog-";
     public static final String TRANSLOG_FILE_SUFFIX = ".tlog";
+    public static final String CHECKPOINT_SUFFIX = ".ckp";
+    public static final String CHECKPOINT_FIEL_NAME = "translog" + CHECKPOINT_SUFFIX;
+
     static final Pattern PARSE_ID_PATTERN = Pattern.compile(TRANSLOG_FILE_PREFIX + "(\\d+)((\\.recovering)|(\\.tlog))?$");
     private final TimeValue syncInterval;
     private final ArrayList<ImmutableTranslogReader> recoveredTranslogs;
@@ -189,7 +192,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
                     current = createWriter(1, true);
                     break;
                 case OPEN:
-                    final Checkpoint checkpoint = TranslogReader.openCheckpoint(location);
+                    final Checkpoint checkpoint = Checkpoint.read(location.resolve(CHECKPOINT_FIEL_NAME));
                     recoveredTranslogs.add(openReader(location.resolve(getFilename(checkpoint.translogId)), false));
                     lastCommittedTranslogId = -1; // playing safe
                     current = createWriter(checkpoint.translogId+1, false);
@@ -210,7 +213,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
         try (ReleasableLock lock = writeLock.acquire()) {
             String checkpointTranslogFile = "";
             try {
-                Checkpoint checkpoint = TranslogReader.openCheckpoint(location);
+                Checkpoint checkpoint = Checkpoint.read(location.resolve(CHECKPOINT_FIEL_NAME));
                 checkpointTranslogFile = getFilename(checkpoint.translogId);
                 foundTranslogs.add(openReader(location.resolve(checkpointTranslogFile), false));
             } catch (NoSuchFileException | FileNotFoundException ex) {
@@ -352,7 +355,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     TranslogWriter createWriter(long id, boolean writeCheckpoints) throws IOException {
         TranslogWriter newFile;
         try {
-            newFile = TranslogWriter.create(type, shardId, id, location.resolve(getFilename(id)), new OnCloseRunnable(), bufferSize, writeCheckpoints);
+            newFile = TranslogWriter.create(type, shardId, id, location.resolve(getFilename(id)), new OnCloseRunnable(), bufferSize);
         } catch (IOException e) {
             throw new TranslogException(shardId, "failed to create new translog file", e);
         }
@@ -484,6 +487,10 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     /** package private for testing */
     public String getFilename(long translogId) {
         return TRANSLOG_FILE_PREFIX + translogId + TRANSLOG_FILE_SUFFIX;
+    }
+
+    private String getCommitFileName(long translogId) {
+        return TRANSLOG_FILE_PREFIX + translogId + CHECKPOINT_SUFFIX;
     }
 
 
@@ -1549,9 +1556,15 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
                 throw new IllegalStateException("already committing a translog with id: " + currentCommittingTranslog.translogId());
             }
             writer = current;
+            writer.sync();
             currentCommittingTranslog = current.immutableReader();
-            current.sync();
-            // create a new translog file - this will sync it
+            Path checkpoint = location.resolve(CHECKPOINT_FIEL_NAME);
+            assert Checkpoint.read(checkpoint).translogId == currentCommittingTranslog.translogId();
+            Path commitCheckpoint = location.resolve(getCommitFileName(currentCommittingTranslog.translogId()));
+            Files.copy(checkpoint, commitCheckpoint);
+            IOUtils.fsync(commitCheckpoint, false);
+            IOUtils.fsync(commitCheckpoint.getParent(), true);
+            // create a new translog file - this will sync it and update the checkpoint data;
             final TranslogWriter newFile = createWriter(current.translogId() + 1, true);
             current = newFile;
             // notify all outstanding views of the new translog (no views are created now as
@@ -1559,14 +1572,13 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             for (FsView view : outstandingViews) {
                 view.onNewTranslog(currentCommittingTranslog.clone(), newFile.reader());
             }
+            IOUtils.close(writer);
             logger.trace("current translog set to [{}]", current.translogId());
             assert writer.syncNeeded() == false : "old translog writer must not need a sync";
 
         } catch (Throwable t) {
-            close();// tragic event
+            close(); // tragic event
             throw t;
-        } finally {
-            IOUtils.close(writer);
         }
     }
 
