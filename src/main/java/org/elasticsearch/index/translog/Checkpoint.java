@@ -50,15 +50,6 @@ class Checkpoint {
         this.translogId = translogId;
     }
 
-    Checkpoint(FileChannel in, long position) throws IOException {
-        ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
-        in.read(buffer, position);
-        buffer.flip();
-        offset = buffer.getLong();
-        numOps = buffer.getInt();
-        translogId = buffer.getLong();
-    }
-
     Checkpoint(DataInput in) throws IOException {
         offset = in.readLong();
         numOps = in.readInt();
