@@ -846,10 +846,6 @@ public class IndexShard extends AbstractIndexShardComponent {
         Map<String, Mapping> recoveredTypes = internalPerformTranslogRecovery(true);
         assert recoveredTypes.isEmpty();
         assert recoveryState.getTranslog().recoveredOperations() == 0;
-        if (wipeTranslogs) {
-            engine().flush(true, true);
-          // nocommit - what do we need to do here?
-        }
     }
 
     /**
