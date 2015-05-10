@@ -81,16 +81,18 @@ public class TranslogWriter extends TranslogReader {
         }
         Files.move(pendingFile, file, StandardCopyOption.ATOMIC_MOVE);
         FileChannel channel = FileChannel.open(file, StandardOpenOption.READ, StandardOpenOption.WRITE);
-        boolean success = false;
         try {
             channel.position(headerLength);
             final TranslogWriter writer = type.create(shardId, id, new ChannelReference(file, id, channel, onClose), bufferSize);
-            success = true;
             return writer;
-        } finally {
-            if (success == false) {
-                IOUtils.closeWhileHandlingException(channel);
+        } catch (Throwable throwable){
+            IOUtils.closeWhileHandlingException(channel);
+            try {
+                Files.delete(file); // remove the file as well
+            } catch (IOException ex) {
+                throwable.addSuppressed(ex);
             }
+            throw throwable;
         }
     }
 
