@@ -298,7 +298,7 @@ public class TranslogWriter extends TranslogReader {
     }
 
     private static void writeCheckpoint(long syncPosition, int numOperations, Path translogFile, long translogId, OpenOption... options) throws IOException {
-        final Path checkpointFile = translogFile.resolve(Translog.CHECKPOINT_FIEL_NAME);
+        final Path checkpointFile = translogFile.resolve(Translog.CHECKPOINT_FILE_NAME);
         Checkpoint checkpoint = new Checkpoint(syncPosition, numOperations, translogId);
         Checkpoint.write(checkpointFile, checkpoint, options);
     }

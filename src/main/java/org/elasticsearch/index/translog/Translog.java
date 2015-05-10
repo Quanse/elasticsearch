@@ -22,7 +22,6 @@ package org.elasticsearch.index.translog;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.TwoPhaseCommit;
 import org.apache.lucene.util.Accountable;
-import org.apache.lucene.util.CollectionUtil;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.elasticsearch.ElasticsearchException;
@@ -36,7 +35,6 @@ import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.lease.Releasables;
 import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.lucene.uid.Versions;
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.Callback;
@@ -72,7 +70,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     public static final String TRANSLOG_FILE_PREFIX = "translog-";
     public static final String TRANSLOG_FILE_SUFFIX = ".tlog";
     public static final String CHECKPOINT_SUFFIX = ".ckp";
-    public static final String CHECKPOINT_FIEL_NAME = "translog" + CHECKPOINT_SUFFIX;
+    public static final String CHECKPOINT_FILE_NAME = "translog" + CHECKPOINT_SUFFIX;
 
     static final Pattern PARSE_ID_PATTERN = Pattern.compile(TRANSLOG_FILE_PREFIX + "(\\d+)((\\.recovering)|(\\.tlog))?$");
 
@@ -128,7 +126,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
 
         try {
             if (lastCommittedTranslogId != null) {
-                final Checkpoint checkpoint = Checkpoint.read(location.resolve(CHECKPOINT_FIEL_NAME));
+                final Checkpoint checkpoint = Checkpoint.read(location.resolve(CHECKPOINT_FILE_NAME));
                 this.recoveredTranslogs = recoverFromFiles(lastCommittedTranslogId, checkpoint);
                 if (recoveredTranslogs.isEmpty()) {
                     throw new IllegalStateException("At least one reader must be recoverd");
@@ -142,7 +140,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
                 Files.createDirectories(location);
                 final long translogID = 1;
                 Checkpoint checkpoint = new Checkpoint(0, 0, translogID);
-                Checkpoint.write(location.resolve(CHECKPOINT_FIEL_NAME), checkpoint, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+                Checkpoint.write(location.resolve(CHECKPOINT_FILE_NAME), checkpoint, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
                 current = createWriter(translogID);
                 this.lastCommittedTranslogId = -1; // playing safe
 
@@ -158,7 +156,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
     public static void upgradeLegacyTranslog(ESLogger logger, TranslogConfig config, long lastCommittedTranslogId) throws IOException {
         Path translogPath = config.getTranslogPath();
         try {
-            Checkpoint checkpoint = Checkpoint.read(translogPath.resolve(CHECKPOINT_FIEL_NAME));
+            Checkpoint checkpoint = Checkpoint.read(translogPath.resolve(CHECKPOINT_FILE_NAME));
             return; // we are upgarded all is well
         } catch (NoSuchFileException | FileNotFoundException ex) {
             logger.warn("Recovering translog but no checkpoint found");
@@ -193,7 +191,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             }
 
             Checkpoint checkpoint = new Checkpoint(Files.size(translogPath.resolve(getFilename(latestTranslogId))), -1, latestTranslogId);
-            Checkpoint.write(translogPath.resolve(CHECKPOINT_FIEL_NAME), checkpoint, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
+            Checkpoint.write(translogPath.resolve(CHECKPOINT_FILE_NAME), checkpoint, StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW);
             Files.delete(translogPath.resolve(getCommitFileName(latestTranslogId)));
             IOUtils.fsync(translogPath, true);
 
@@ -219,7 +217,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             }
             foundTranslogs.add(openReader(location.resolve(checkpointTranslogFile), checkpoint));
             Path commitCheckpoint = location.resolve(getCommitFileName(checkpoint.translogId));
-            Files.copy(location.resolve(CHECKPOINT_FIEL_NAME), commitCheckpoint);
+            Files.copy(location.resolve(CHECKPOINT_FILE_NAME), commitCheckpoint);
             IOUtils.fsync(commitCheckpoint, false);
             IOUtils.fsync(commitCheckpoint.getParent(), true);
             success = true;
@@ -1535,7 +1533,7 @@ public class Translog extends AbstractIndexShardComponent implements IndexShardC
             writer = current;
             writer.sync();
             currentCommittingTranslog = current.immutableReader();
-            Path checkpoint = location.resolve(CHECKPOINT_FIEL_NAME);
+            Path checkpoint = location.resolve(CHECKPOINT_FILE_NAME);
             assert Checkpoint.read(checkpoint).translogId == currentCommittingTranslog.translogId();
             Path commitCheckpoint = location.resolve(getCommitFileName(currentCommittingTranslog.translogId()));
             Files.copy(checkpoint, commitCheckpoint);

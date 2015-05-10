@@ -846,7 +846,7 @@ public class TranslogTests extends ElasticsearchTestCase {
         assertEquals(translogOperations, translog.totalOperations());
         final Translog.Location lastLocation = translog.add(new Translog.Create("test", "" + translogOperations, Integer.toString(translogOperations).getBytes(Charset.forName("UTF-8"))));
 
-        final Checkpoint checkpoint = Checkpoint.read(translog.location().resolve(Translog.CHECKPOINT_FIEL_NAME));
+        final Checkpoint checkpoint = Checkpoint.read(translog.location().resolve(Translog.CHECKPOINT_FILE_NAME));
         try (final ImmutableTranslogReader reader = translog.openReader(translog.location().resolve(translog.getFilename(translog.currentId())), checkpoint)) {
             assertEquals(lastSynced + 1, reader.totalOperations());
             for (int op = 0; op < translogOperations; op++) {
@@ -885,7 +885,7 @@ public class TranslogTests extends ElasticsearchTestCase {
         }
         writer.sync();
 
-        final TranslogReader reader = randomBoolean() ? writer : translog.openReader(writer.path(), Checkpoint.read(translog.location().resolve(Translog.CHECKPOINT_FIEL_NAME)));
+        final TranslogReader reader = randomBoolean() ? writer : translog.openReader(writer.path(), Checkpoint.read(translog.location().resolve(Translog.CHECKPOINT_FILE_NAME)));
         for (int i = 0; i < numOps; i++) {
             ByteBuffer buffer = ByteBuffer.allocate(4);
             reader.readBytes(buffer, reader.firstPosition() + 4*i);
